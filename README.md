@@ -101,7 +101,7 @@ Copy `.env.example` to `.env` (or set the variables in your host):
 | `BRIDGE_API_PREFIX` | `/api/bridge/v1` | Bridge path (`/bridge/v1` also works) |
 | `BRIDGE_TIMEOUT_MS` | `15000` | Collect/status timeout |
 | `BRIDGE_API_KEY` | – | Only if your deployment protects the bridge |
-| `PUBLIC_BASE_URL` | `http://localhost:3000` | Used for the default `redirect_url` |
+| `PUBLIC_BASE_URL` | unset → derived per request | Used for the default `redirect_url`. When unset, the host the browser used is used, so LAN IPs, `localhost` and hosted previews all work |
 | `PORT` / `HOST` | `3000` / `0.0.0.0` | Listen address |
 | `CORS_ORIGIN` | `*` | Origin allowed to call `/api/*` from a browser |
 | `FETCH_PAYMENT_PAGE` | `1` | Read the hosted checkout page for tokens/intents |
@@ -114,6 +114,22 @@ Copy `.env.example` to `.env` (or set the variables in your host):
 > the JSON the bridge returns.
 
 ---
+
+### Testing on a phone
+
+The server always binds `0.0.0.0`, so any device that can reach the host works. On startup it prints the LAN URLs:
+
+```
+  ├─ Local      http://localhost:3000
+  ├─ Network    http://192.168.1.24:3000   ← open this on your phone
+```
+
+* **Same Wi-Fi (your machine):** open the `Network` URL on the phone. If it doesn't load, allow Node through the
+  firewall (Windows: *Private networks*), and make sure the phone is on the same subnet.
+* **Hosted sandbox / preview:** use the preview URL the platform provides
+  (`https://<port>-<sandbox-id>.e2b.app`). Put that in `PUBLIC_BASE_URL` so gateway `redirect_url`s point there too.
+* `redirect_url` is derived from the request host (`X-Forwarded-Host`/`Host` + `X-Forwarded-Proto`), so a payment
+  started from the phone returns to the right origin. Set `PUBLIC_BASE_URL` to pin it explicitly.
 
 ## 4. This app's API
 

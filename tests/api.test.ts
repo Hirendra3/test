@@ -185,7 +185,9 @@ test('POST /api/pay normalises phone numbers and derives a redirect_url', async 
   assert.ok(captured);
   assert.equal(captured!.customer_phone, '9876543210');
   assert.equal(captured!.pg_type, 'phonepe');
-  assert.match(captured!.redirect_url, /^http:\/\/localhost:3000\/pay\/ORDER_HTTP_2$/);
+  // supertest's default host is 127.0.0.1:<ephemeral>, so the derived origin
+  // follows the request rather than a hardcoded localhost.
+  assert.match(captured!.redirect_url, /^http:\/\/127\.0\.0\.1:\d+\/pay\/ORDER_HTTP_2$/);
 });
 
 test('POST /api/pay maps gateway failures to API errors', async () => {
@@ -378,4 +380,51 @@ test('POST /api/decode reads the bridge QR image and reports it is not a UPI QR'
   assert.ok(codes.includes('QR_NOT_UPI'));
   assert.match(response.body.fields[0].value, /^https:\/\/mercury-t2\.phonepe\.com\/transact\/pgv3\?token=/);
   assert.equal(response.body.intents.length, 0);
+});
+
+test('redirect_url follows the host the browser used (LAN / mobile / preview)', async () => {
+  let captured: CollectRequest | null = null;
+  const app = makeApp({
+    collect: async (body) => {
+      captured = body;
+      return { payment_url: `https://mercury-t2.phonepe.com/x?token=${tokenFor(body.txn_id)}` };
+    },
+  });
+
+  await request(app)
+    .post('/api/pay')
+    .set('Host', '192.168.1.24:3000')
+    .send({ ...validOrder, txn_id: 'ORDER_LAN_1' })
+    .expect(200);
+  assert.equal(captured!.redirect_url, 'http://192.168.1.24:3000/pay/ORDER_LAN_1');
+
+  // behind a TLS proxy (the hosted preview) the scheme must be https
+  await request(app)
+    .post('/api/pay')
+    .set('X-Forwarded-Host', '3000-abc123.e2b.app')
+    .set('X-Forwarded-Proto', 'https')
+    .send({ ...validOrder, txn_id: 'ORDER_PREVIEW_1' })
+    .expect(200);
+  assert.equal(captured!.redirect_url, 'https://3000-abc123.e2b.app/pay/ORDER_PREVIEW_1');
+});
+
+test('an explicit PUBLIC_BASE_URL still wins over the request host', async () => {
+  let captured: CollectRequest | null = null;
+  const app = makeApp(
+    {
+      collect: async (body) => {
+        captured = body;
+        return { payment_url: `https://mercury-t2.phonepe.com/x?token=${tokenFor(body.txn_id)}` };
+      },
+    },
+    { PUBLIC_BASE_URL: 'https://shop.example.com' },
+  );
+
+  await request(app)
+    .post('/api/pay')
+    .set('Host', '192.168.1.24:3000')
+    .send({ ...validOrder, txn_id: 'ORDER_FIXED_1' })
+    .expect(200);
+
+  assert.equal(captured!.redirect_url, 'https://shop.example.com/pay/ORDER_FIXED_1');
 });

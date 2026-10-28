@@ -22,6 +22,12 @@ export class CheckoutError extends Error {
 }
 
 export interface CreatePaymentInput {
+  /**
+   * Origin the customer's browser is actually on (`http://192.168.1.5:3000`,
+   * `https://3000-xxx.e2b.app`, …). Used for redirect_url unless the caller
+   * supplies one, so mobile/LAN/preview access returns to a reachable host.
+   */
+  baseUrl?: string;
   pgType: string;
   txnId?: string;
   amount: number;
@@ -84,7 +90,8 @@ export async function createPayPlan(
   const requestedPgType = input.pgType;
   const pgType = normalizePgType(requestedPgType, config.defaultPgType);
   const txnId = input.txnId?.trim() || generateTxnId();
-  const redirectUrl = input.redirectUrl?.trim() || `${config.publicBaseUrl}/pay/${encodeURIComponent(txnId)}`;
+  const baseUrl = (input.baseUrl ?? config.publicBaseUrl).replace(/\/+$/, '');
+  const redirectUrl = input.redirectUrl?.trim() || `${baseUrl}/pay/${encodeURIComponent(txnId)}`;
 
   const collectBody: CollectRequest = {
     pg_type: pgType,

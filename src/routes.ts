@@ -14,6 +14,23 @@ import { decodeArbitraryValue } from './services/decode.js';
 import { readReturnHint, verifyReturn } from './services/verify.js';
 import type { ApiError } from './lib/types.js';
 
+/**
+ * Origin to hand back to the gateway as `redirect_url`.
+ * Order: explicit PUBLIC_BASE_URL -> the origin this request came in on ->
+ * the configured fallback. That keeps LAN / preview / mobile hosts working.
+ */
+export function resolveBaseUrl(req: Request, config: Config): string {
+  if (config.publicBaseUrlExplicit) return config.publicBaseUrl;
+
+  const forwardedHost = req.get('x-forwarded-host');
+  const host = (forwardedHost ? forwardedHost.split(',')[0] : req.get('host'))?.trim();
+  if (!host) return config.publicBaseUrl;
+
+  const forwardedProto = req.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  const proto = forwardedProto === 'https' || req.secure ? 'https' : 'http';
+  return `${proto}://${host}`;
+}
+
 export class ApiErrorResponse extends Error {
   readonly status: number;
   readonly code: string;
@@ -131,6 +148,7 @@ export function createApiRouter(config: Config, bridge: BridgeClient): Router {
       const result = await createPayPlan(
         { config, bridge },
         {
+          baseUrl: resolveBaseUrl(req, config),
           pgType,
           txnId: data.txn_id,
           amount,

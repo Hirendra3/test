@@ -6,6 +6,8 @@ export interface Config {
   port: number;
   host: string;
   publicBaseUrl: string;
+  /** true when PUBLIC_BASE_URL was set explicitly (otherwise per-request host is used). */
+  publicBaseUrlExplicit: boolean;
   corsOrigin: string;
   bridgeBaseUrl: string;
   bridgeApiPrefix: string;
@@ -29,13 +31,18 @@ function bool(value: string | undefined, fallback: boolean): boolean {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const publicBaseUrl = (env.PUBLIC_BASE_URL ?? `http://localhost:${env.PORT ?? 3000}`).replace(/\/+$/, '');
+  const explicitBase = env.PUBLIC_BASE_URL?.trim();
+  const publicBaseUrl = (explicitBase && explicitBase.length > 0
+    ? explicitBase
+    : `http://localhost:${env.PORT ?? 3000}`
+  ).replace(/\/+$/, '');
   const demoRaw = (env.DEMO_MODE ?? 'auto').toLowerCase();
 
   return {
     port: num(env.PORT, 3000),
     host: env.HOST ?? '0.0.0.0',
     publicBaseUrl,
+    publicBaseUrlExplicit: Boolean(explicitBase && explicitBase.length > 0),
     corsOrigin: env.CORS_ORIGIN ?? '*',
     bridgeBaseUrl: (env.BRIDGE_BASE_URL ?? 'https://www.jayamanicollections.com').replace(/\/+$/, ''),
     bridgeApiPrefix: `/${(env.BRIDGE_API_PREFIX ?? '/api/bridge/v1').replace(/^\/+|\/+$/g, '')}`,

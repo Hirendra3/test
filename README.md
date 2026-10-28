@@ -89,7 +89,8 @@ Production:
 ```bash
 npm run build        # tsc → dist/, esbuild → public/
 npm start            # serves UI + API on :3000
-npm test             # 37 tests — decoding, ranking, status, HTTP routes, DOM smoke tests
+npm test             # 43 tests — decoding, ranking, status, HTTP routes, QR, DOM smoke tests
+npm run mock         # offline bridge on :4010 replaying a real encrypted-token response
 ```
 
 Copy `.env.example` to `.env` (or set the variables in your host):
@@ -236,7 +237,8 @@ client-reported amount.
 
 ### `POST /api/decode` — “why is my link broken?”
 
-Accepts a `payment_url`, a raw token, a checkout page URL, or the failing intent itself.
+Accepts a `payment_url`, a raw token, a **QR image data-URL** (from `qr_code`), a checkout page URL, or the failing
+intent itself.
 
 ```bash
 curl -s -X POST localhost:3000/api/decode -H 'Content-Type: application/json' \
@@ -392,18 +394,79 @@ src/
     tokenDecoder.ts         recursive base64url-JSON walker + HTML miner
     upi.ts                  intent parsing/validation, app deep links (byte-identical query)
     planner.ts              ranking, pay actions, diagnostics
-    qr.ts, base64.ts, http.ts, types.ts
+    qrDecode.ts             decode QR *images* (resample + zxing/jsQR fallback)
+    url.ts, qr.ts, base64.ts, http.ts, types.ts
   public/                   index.html, styles.css, app.ts (esbuild → public/)
 tests/
-  payment.test.ts           18 tests: decoding, ranking, status, validation
-  api.test.ts               17 tests: routes, errors, verify/webhook, CORS (supertest + stubbed bridge)
+  payment.test.ts           23 tests: decoding, ranking, status, QR images, live-response fixture
+  api.test.ts               19 tests: routes, errors, verify/webhook, CORS, decode (supertest)
   ui.test.ts                2 DOM smoke tests: pay button/QR/tabs/embed + verified return banner
-scripts/                    dev.mjs, build-client.mjs, ensure-build.mjs
+  fixtures/                 a real PhonePe redirect-mode response + its QR PNG
+scripts/                    dev.mjs, build-client.mjs, ensure-build.mjs, mock-bridge.mjs
 ```
 
 ---
 
-## 8. Troubleshooting
+## 8. Live case: encrypted tokens in PhonePe “redirect” mode
+
+This is what a **real** `collect` response looks like when the bridge is in redirect mode — note there are **no
+intent fields at all**, and `mode` is `"redirect"`:
+
+```jsonc
+{
+  "payment_url":  "https://mercury-t2.phonepe.com/transact/pgv3?token=hq4wOGdzX31IuPyyh7/7AYOL…",
+  "pg_payment_url": "…same…",
+  "token_url":    "…same…",
+  "checkout_script": "https://mercury.phonepe.com/web/bundle/checkout.js",
+  "qr_string":    "…same hosted URL…",
+  "qr_code":      "data:image/png;base64,iVBORw0KGgo…",   // 320×320 PNG
+  "custom_payment_url": "https://www.jayamanicollections.com/pay/ORDER_75781799",
+  "pg_transaction_id": "ORDER_75781799",
+  "mode": "redirect"
+}
+```
+
+Decoding that payload by hand shows three things — the app detects all of them and says so in **Diagnostics**:
+
+| Fact | Evidence | Consequence |
+| :-- | :-- | :-- |
+| The token is **AES-encrypted**, not base64 JSON | 391 bytes of binary, 34 % printable, no `{` and no `upi://` inside | Only PhonePe's checkout page can read the intent → **no client can extract it** |
+| `qr_code` is **not a UPI QR** | decoded PNG → `https://mercury-t2.phonepe.com/transact/pgv3?token=…` | scanning it opens the hosted page, not a payment app |
+| `qr_string` / `qr_code` are the **payment_url again** | byte-identical | nothing new to mine |
+
+So for this response the app does **not** invent an intent. It reports:
+
+```
+TOKEN_ENCRYPTED      The token in mercury-t2.phonepe.com is 391 bytes of binary (encrypted), not base64 JSON…
+INTENT_ONLY_ON_PAGE  The UPI intent lives inside the encrypted token, which only PhonePe's checkout page can read…
+QR_IS_CHECKOUT_URL   The bridge QR code contains the hosted checkout URL, not a UPI intent…
+```
+
+…and offers the two paths that actually work:
+
+1. **In-page modal** — `hosted.canEmbed: true`, so the UI's *“Pay without leaving this page”* button loads
+   `checkout.js` and calls `PhonePeCheckout.transact({ tokenUrl, type: 'IFRAME' })`. The customer never leaves your
+   site and the token stays inside PhonePe's iframe.
+2. **Hosted checkout** — `primary.kind: "hosted"`, the `payment_url` PhonePe issued. One tap, works everywhere.
+
+### If you need a real `upi://` intent, the *bridge* must produce it
+
+An intent cannot be derived on the client: it needs the merchant's **UPI ID (VPA)** and PhonePe's **signature**
+(`sign`, `orgid`, `mc`, `mode`), which live only in the bridge's gateway credentials. Ask the bridge to return either:
+
+```jsonc
+{
+  "intent_url": "upi://pay?pa=<real-merchant-vpa>&pn=<store>&tr=ORDER_75781799&am=499.00&cu=INR&mc=5411&mode=04&orgid=159761&sign=<gateway-signature>"
+}
+```
+
+…or `qr_string` containing that intent instead of the hosted URL. The moment either appears, this app picks it up
+automatically, verifies `sign`/amount/reference, and switches the Pay button to `kind: "intent"` — nothing else
+changes.
+
+> Verify a live response yourself: `POST /api/decode { "url": "<payment_url or token or qr_code data-url>" }`.
+
+## 9. Troubleshooting
 
 | Symptom | Cause | Fix |
 | :-- | :-- | :-- |
@@ -417,10 +480,12 @@ scripts/                    dev.mjs, build-client.mjs, ensure-build.mjs
 | In-page modal says the script could not load | `checkout.js` blocked by CSP or offline | Allow `mercury.phonepe.com` in `script-src`, or use the hosted button |
 | Return page shows “claim vs gateway” mismatch | Someone edited the redirect params (or a stale callback) | Expected: your fulfilment must key off `verified: true` only |
 | Webhook keeps being retried | Your handler returned non-2xx | Return `200` once `verify` responds; make it idempotent by `txn_id` |
+| `TOKEN_ENCRYPTED` + `QR_IS_CHECKOUT_URL`, Pay button is *hosted* | PhonePe redirect mode: token is AES, QR is the hosted URL | Use the in-page modal / hosted checkout, or make the bridge return a signed `intent_url` (§8) |
+| QR shows as “Open the gateway checkout on your phone” | That QR really is a checkout URL | Expected — a real UPI QR appears as “Scan with any UPI app” |
 
 ---
 
-## 9. Security notes
+## 10. Security notes
 
 * Bridge credentials never reach this app or the browser; the bridge signs and hashes everything.
 * `/api/decode` fetches user-supplied URLs — it rejects non-`http(s)`, loopback, link-local and private ranges.

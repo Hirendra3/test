@@ -86,3 +86,35 @@ export function previewToken(token: string, head = 18, tail = 10): string {
   if (token.length <= head + tail + 3) return token;
   return `${token.slice(0, head)}...${token.slice(-tail)}`;
 }
+
+export interface TokenInspection {
+  bytes: number;
+  printableRatio: number;
+  /** True when the bytes are binary rather than text (i.e. encrypted). */
+  opaque: boolean;
+  firstBytesHex: string;
+}
+
+/**
+ * Distinguish "this is base64 but it is not JSON" from "this is base64 JSON".
+ * Live PhonePe tokens in redirect mode decode to AES ciphertext: the intent is
+ * inside, but only their checkout JS holds the key.
+ */
+export function inspectToken(value: string): TokenInspection | null {
+  const buffer = decodeBase64(value);
+  if (!buffer || buffer.length === 0) return null;
+
+  let printable = 0;
+  for (const byte of buffer) {
+    if (byte === 9 || byte === 10 || byte === 13 || (byte >= 32 && byte < 127)) printable += 1;
+  }
+  const printableRatio = printable / buffer.length;
+  const firstBytesHex = buffer.subarray(0, 8).toString('hex');
+
+  return {
+    bytes: buffer.length,
+    printableRatio,
+    opaque: printableRatio < 0.85,
+    firstBytesHex,
+  };
+}

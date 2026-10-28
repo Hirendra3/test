@@ -10,7 +10,7 @@
  * id, expiry...). It never mutates the URLs it finds.
  */
 
-import { looksLikeBase64, previewToken, tryDecodeJson } from './base64.js';
+import { inspectToken, looksLikeBase64, previewToken, tryDecodeJson } from './base64.js';
 import { isUpiIntentUrl, sanitizeScrapedUrl } from './upi.js';
 
 export interface ExtractedIntent {
@@ -175,12 +175,12 @@ export function walk(value: unknown, rootPath = '$', result: WalkResult = emptyR
 export function analyzeToken(token: string): WalkResult {
   const decoded = tryDecodeJson(token);
   if (!decoded) {
-    return {
-      ...emptyResult(),
-      warnings: [
-        `Token could not be decoded as base64url JSON (${token.length} chars, ${previewToken(token)}).`,
-      ],
-    };
+    const inspection = inspectToken(token);
+    const why = inspection?.opaque
+      ? `Token decodes to ${inspection.bytes} bytes of binary (starts ${inspection.firstBytesHex}), not JSON: ` +
+        `PhonePe encrypted this token, so the payload — including any UPI intent — is only readable by their checkout page.`
+      : `Token could not be decoded as base64url JSON (${token.length} chars, ${previewToken(token)}).`;
+    return { ...emptyResult(), warnings: [why] };
   }
 
   const result: WalkResult = {

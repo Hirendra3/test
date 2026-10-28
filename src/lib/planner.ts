@@ -8,6 +8,7 @@
  * which always works in a browser.
  */
 
+import { inspectToken, tryDecodeJson } from './base64.js';
 import { fitsInQr } from './qr.js';
 import {
   analyzeToken,
@@ -20,7 +21,8 @@ import {
   type TokenSource,
   type WalkResult,
 } from './tokenDecoder.js';
-import { evaluateIntent, paisaToAmount } from './upi.js';
+import { evaluateIntent, isUpiIntentUrl as isUpiIntent, paisaToAmount } from './upi.js';
+import { hostOf } from './url.js';
 import type {
   DecodedSource,
   Diagnostic,
@@ -59,6 +61,8 @@ export interface PlanInput {
   txnId: string;
   amountPaisa: number;
   collectPayload: unknown;
+  /** Payload recovered from the bridge's QR *image* (data URL decoded upstream). */
+  decodedQr?: { payload: string; method: string } | null;
   pages: PageSnapshot[];
   sessionPayload: unknown | null;
   demo: boolean;
@@ -73,14 +77,16 @@ const SOURCE_SCORE: Record<IntentSource, number> = {
   token: 60,
   'payment-page': 50,
   session: 40,
+  'qr-image': 30,
   'bridge-intent-url': 20,
   'bridge-qr': 5,
 };
 
 const SOURCE_RANK: Record<IntentSource, number> = {
-  token: 5,
-  'payment-page': 4,
-  session: 3,
+  token: 6,
+  'payment-page': 5,
+  session: 4,
+  'qr-image': 3,
   'bridge-intent-url': 2,
   'bridge-qr': 1,
 };
@@ -89,6 +95,7 @@ const SOURCE_LABEL: Record<IntentSource, string> = {
   token: 'PhonePe token payload',
   'payment-page': 'Hosted checkout page',
   session: 'Active session API',
+  'qr-image': 'Decoded QR image',
   'bridge-intent-url': 'Bridge response field',
   'bridge-qr': 'Bridge QR string',
 };
@@ -103,14 +110,6 @@ function normalizeKey(key: string): string {
 
 function isHttpUrl(value: string): boolean {
   return /^https?:\/\//i.test(value.trim());
-}
-
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
 }
 
 interface FieldHit {
@@ -195,6 +194,7 @@ function collectCandidates(input: PlanInput, urls: HostedUrls): {
 
   const addCandidates = (intents: ExtractedIntent[], source: IntentSource): void => {
     for (const intent of intents) {
+      if (!isUpiIntent(intent.raw)) continue;
       const existing = candidates.find((c) => c.raw === intent.raw);
       if (existing) {
         // Same link seen twice: remember the most trustworthy place it came from.
@@ -227,7 +227,39 @@ function collectCandidates(input: PlanInput, urls: HostedUrls): {
   const nested = collectWalk.intents.filter((i) => i.path.includes('<decoded>'));
   addCandidates(nested, 'token');
 
-  if (urls.qrString) addCandidates([{ raw: urls.qrString, path: '$.qr_string' }], 'bridge-qr');
+  if (urls.qrString && isUpiIntent(urls.qrString)) {
+    addCandidates([{ raw: urls.qrString, path: '$.qr_string' }], 'bridge-qr');
+  }
+
+  // The gateway may ship an encrypted (non-JSON) token: flag it explicitly so
+  // "no intent" is explained instead of looking like a decoder failure.
+  for (const url of [urls.paymentUrl, urls.pgPaymentUrl, urls.tokenUrl]) {
+    if (!url) continue;
+    let token: string | null = null;
+    try {
+      const parsed = new URL(url);
+      token = parsed.searchParams.get('token') ?? parsed.searchParams.get('txnToken');
+    } catch {
+      token = null;
+    }
+    if (!token || tryDecodeJson(token)) continue;
+    const inspection = inspectToken(token);
+    if (!inspection?.opaque) continue;
+    notes.push(
+      `The token in ${hostOf(url)} is ${inspection.bytes} bytes of binary (encrypted), not base64 JSON.`,
+    );
+    break;
+  }
+  if (input.decodedQr && isUpiIntent(input.decodedQr.payload)) {
+    addCandidates([{ raw: input.decodedQr.payload, path: '$.qr_code<image>' }], 'qr-image');
+    notes.push(`Decoded qr_code image (${input.decodedQr.method}) into a UPI intent.`);
+  } else if (input.decodedQr) {
+    notes.push(
+      `Decoded qr_code image (${input.decodedQr.method}); it contains ${
+        /^https?:\/\//i.test(input.decodedQr.payload) ? 'a checkout URL' : 'plain text'
+      }, not a UPI intent.`,
+    );
+  }
 
   // 2. tokens inside the hosted URLs
   for (const url of new Set([urls.paymentUrl, urls.tokenUrl, urls.pgPaymentUrl]) ) {
@@ -448,18 +480,83 @@ export function buildPayPlan(input: PlanInput): PlanResult {
     });
   }
 
+  // ---- why is there no intent? -------------------------------------------
+  const tokenWarnings = tokens.flatMap(({ source }) => analyzeToken(source.token).warnings);
+  const encryptedNote =
+    tokenWarnings.find((warning) => /encrypted/i.test(warning)) ??
+    notes.find((note) => /encrypted/i.test(note));
+  if (encryptedNote && !primaryIntent) {
+    diagnostics.push({
+      level: 'warn',
+      code: 'TOKEN_ENCRYPTED',
+      message: `${encryptedNote} Only PhonePe's checkout page can read it, so no intent can be extracted here.`,
+    });
+  }
+  if (!primaryIntent && encryptedNote) {
+    diagnostics.push({
+      level: 'info',
+      code: 'INTENT_ONLY_ON_PAGE',
+      message:
+        'The UPI intent lives inside the encrypted token, which only PhonePe\'s checkout page can read. ' +
+        'Use the hosted payment_url (or the in-page modal) — an intent link cannot be derived from this ' +
+        'response without the merchant UPI ID + signing key.',
+    });
+  }
+
   // ---- QR ----------------------------------------------------------------
+  // Priority: the signed intent -> a UPI QR found in the payload -> the
+  // gateway's own QR image (which on PhonePe redirect mode is just a link to
+  // their hosted page, so we label it honestly instead of saying "scan to pay").
   let qr: QrView | null = null;
-  const qrValue = primaryIntent?.raw ?? urls.qrString ?? urls.qrCode;
-  if (qrValue) {
-    qr = { value: qrValue, dataUrl: null, source: primaryIntent?.source ?? 'bridge-qr' };
-    if (!fitsInQr(qrValue)) {
-      diagnostics.push({
-        level: 'warn',
-        code: 'QR_TOO_LONG',
-        message: 'The intent is too long to encode as a scannable QR code; a hosted-checkout QR is used instead.',
-      });
-    }
+  const bridgeQrImage = urls.qrCode && urls.qrCode.startsWith('data:image/') ? urls.qrCode : null;
+  const upiQrString = urls.qrString && isUpiIntent(urls.qrString) ? urls.qrString : null;
+  const decodedQrIsIntent = input.decodedQr ? isUpiIntent(input.decodedQr.payload) : false;
+
+  if (primaryIntent) {
+    qr = {
+      value: primaryIntent.raw,
+      dataUrl: null,
+      source: primaryIntent.source,
+      kind: 'upi-intent',
+      bridgeImage: bridgeQrImage,
+    };
+  } else if (decodedQrIsIntent && input.decodedQr) {
+    qr = {
+      value: input.decodedQr.payload,
+      dataUrl: null,
+      source: 'qr-image',
+      kind: 'upi-intent',
+      bridgeImage: bridgeQrImage,
+    };
+  } else if (upiQrString) {
+    qr = { value: upiQrString, dataUrl: null, source: 'bridge-qr', kind: 'upi-intent', bridgeImage: bridgeQrImage };
+  } else if (input.decodedQr && /^https?:\/\//i.test(input.decodedQr.payload)) {
+    // The bridge's QR encodes its hosted checkout page: still useful (scan it on
+    // a phone to finish there), but it is not a "scan to pay" UPI code.
+    qr = {
+      value: input.decodedQr.payload,
+      dataUrl: bridgeQrImage,
+      source: 'bridge-image',
+      kind: 'checkout-url',
+      bridgeImage: bridgeQrImage,
+    };
+    diagnostics.push({
+      level: 'info',
+      code: 'QR_IS_CHECKOUT_URL',
+      message:
+        'The bridge QR code contains the hosted checkout URL, not a UPI intent: scanning it opens ' +
+        `${hostOf(input.decodedQr.payload)} rather than a payment app.`,
+    });
+  } else if (bridgeQrImage) {
+    qr = { value: hostedUrl ?? '', dataUrl: bridgeQrImage, source: 'bridge-image', kind: 'checkout-url', bridgeImage: bridgeQrImage };
+  }
+
+  if (qr && !qr.dataUrl && !fitsInQr(qr.value)) {
+    diagnostics.push({
+      level: 'warn',
+      code: 'QR_TOO_LONG',
+      message: 'The intent is too long to encode as a scannable QR code; the hosted checkout is used instead.',
+    });
   }
 
   // ---- decode report -----------------------------------------------------

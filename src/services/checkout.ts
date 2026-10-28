@@ -4,6 +4,7 @@ import { BridgeError, type BridgeClient, type CollectRequest } from '../bridge/c
 import { buildDemoCollectResponse } from '../demo.js';
 import { buildPayPlan, extractHostedUrls, type PageSnapshot, type PlanResult } from '../lib/planner.js';
 import { renderQr } from '../lib/qr.js';
+import { decodeQrDataUrl } from '../lib/qrDecode.js';
 import type { PgType } from '../lib/types.js';
 
 export class CheckoutError extends Error {
@@ -121,9 +122,12 @@ export async function createPayPlan(
   // and hit the session API in parallel — both are best-effort.
   const pagesPromise: Promise<PageSnapshot[]> = (async () => {
     if (!config.fetchPaymentPage || demo) return [];
-    const targets = [urls.paymentUrl, urls.pgPaymentUrl]
+    // The gateway page holds the token; `custom_payment_url` is the merchant's
+    // own /pay/<id> page, which sometimes renders the intent or QR itself.
+    const targets = [urls.paymentUrl ?? urls.pgPaymentUrl, urls.customPaymentUrl]
       .filter((url): url is string => typeof url === 'string' && /^https?:\/\//i.test(url))
-      .slice(0, 1);
+      .filter((url, index, all) => all.indexOf(url) === index)
+      .slice(0, 2);
     if (targets.length === 0) return [];
     const results = await Promise.all(targets.map((url) => bridge.fetchPage(url)));
     return results.map((result) => ({
@@ -146,12 +150,25 @@ export async function createPayPlan(
 
   const [pages, sessionPayload] = await Promise.all([pagesPromise, sessionPromise]);
 
+  // A bridge may hand back a QR *image* instead of an intent string. Decode it:
+  // on PhonePe redirect mode it is only their hosted URL, but on intent flows it
+  // can hold the signed intent, so it is always worth reading.
+  const qrImage = urls.qrCode;
+  const decodedQr =
+    qrImage && qrImage.startsWith('data:image/')
+      ? await (async () => {
+          const result = decodeQrDataUrl(qrImage);
+          return result ? { payload: result.payload, method: result.method } : null;
+        })()
+      : null;
+
   const result = buildPayPlan({
     pgType,
     requestedPgType,
     txnId,
     amountPaisa: input.amount,
     collectPayload,
+    decodedQr,
     pages,
     sessionPayload,
     demo,
@@ -219,12 +236,22 @@ export async function resumePayPlan(
     return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : null;
   })();
 
+  const qrImage = urls.qrCode;
+  const decodedQr =
+    qrImage && qrImage.startsWith('data:image/')
+      ? await (async () => {
+          const decoded = decodeQrDataUrl(qrImage);
+          return decoded ? { payload: decoded.payload, method: decoded.method } : null;
+        })()
+      : null;
+
   const result = buildPayPlan({
     pgType,
     requestedPgType: pgTypeRaw ?? pgType,
     txnId,
     amountPaisa: amountHint ?? amountFromSession ?? 0,
     collectPayload: sessionPayload,
+    decodedQr,
     pages,
     sessionPayload,
     demo: false,

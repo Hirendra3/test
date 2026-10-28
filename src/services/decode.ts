@@ -9,6 +9,8 @@ import type { BridgeClient } from '../bridge/client.js';
 import { tryDecodeJson } from '../lib/base64.js';
 import { mineCheckoutPage, walk, analyzeToken, type IndexedField } from '../lib/tokenDecoder.js';
 import { evaluateIntent, isUpiIntentUrl } from '../lib/upi.js';
+import { inspectToken } from '../lib/base64.js';
+import { decodeQrDataUrl } from '../lib/qrDecode.js';
 import type { Diagnostic, IntentView } from '../lib/types.js';
 
 export interface DecodeResult {
@@ -74,7 +76,48 @@ export async function decodeArbitraryValue(
     return { kind: 'intent', input: value, intents: [intent], fields: [], notes, diagnostics };
   }
 
-  // 2. an encoded token
+  // 2. a QR image (data URL or raw base64 PNG) — decode what it actually holds
+  const qrImage = value.startsWith('data:image/') ? value : null;
+  if (qrImage) {
+    const decoded = decodeQrDataUrl(qrImage);
+    if (!decoded) {
+      diagnostics.push({
+        level: 'error',
+        code: 'QR_UNREADABLE',
+        message: 'The QR image could not be decoded (too small, blurred, or not a QR).',
+      });
+      return { kind: 'intent', input: value.slice(0, 64) + '…', intents: [], fields: [], notes, diagnostics };
+    }
+
+    const isIntent = isUpiIntentUrl(decoded.payload);
+    const intent = isIntent
+      ? evaluateIntent(decoded.payload, { source: 'qr-image', trusted: true })
+      : null;
+    if (intent) intent.jsonPath = 'qr_code<image>';
+
+    notes.push(`Decoded the QR image (${decoded.method}) into ${decoded.kind}.`);
+    if (!isIntent) {
+      diagnostics.push({
+        level: 'warn',
+        code: 'QR_NOT_UPI',
+        message:
+          decoded.kind === 'checkout-url'
+            ? 'The QR contains a checkout URL, not a UPI intent — scanning it opens the gateway page, not a payment app.'
+            : 'The QR contains plain text, not a UPI intent.',
+      });
+    }
+
+    return {
+      kind: 'intent',
+      input: 'qr-image',
+      intents: intent ? [intent] : [],
+      fields: [{ path: 'qr_code<image>', key: 'qr_payload', value: decoded.payload }],
+      notes,
+      diagnostics,
+    };
+  }
+
+  // 3. an encoded token
   if (!isHttpUrl(value) && value.length > 16) {
     const decoded = tryDecodeJson(value);
     if (decoded) {
@@ -87,6 +130,17 @@ export async function decodeArbitraryValue(
         })
         .filter((i): i is IntentView => i !== null);
       notes.push(`Decoded ${analysed.layers.length} token layer(s).`);
+      if (analysed.layers.length === 0) {
+        const inspection = inspectToken(value);
+        diagnostics.push({
+          level: 'warn',
+          code: inspection?.opaque ? 'TOKEN_ENCRYPTED' : 'TOKEN_NOT_JSON',
+          message: inspection?.opaque
+            ? `This token is ${inspection.bytes} bytes of binary (AES-encrypted by the gateway), not base64 JSON. ` +
+              'Its intent can only be read by the gateway checkout page.'
+            : analysed.warnings[0] ?? 'The token is not base64url JSON.',
+        });
+      }
       if (intents.length === 0) {
         diagnostics.push({
           level: 'warn',
@@ -98,7 +152,33 @@ export async function decodeArbitraryValue(
     }
   }
 
-  // 3. a URL: fetch the page (or decode the token inside it)
+  // 3b. base64-ish but not JSON: an encrypted / opaque token
+  if (!isHttpUrl(value) && value.length > 16) {
+    const inspection = inspectToken(value);
+    if (inspection) {
+      diagnostics.push({
+        level: 'warn',
+        code: inspection.opaque ? 'TOKEN_ENCRYPTED' : 'TOKEN_NOT_JSON',
+        message: inspection.opaque
+          ? `This token is ${inspection.bytes} bytes of binary (AES-encrypted by the gateway), not base64 JSON. ` +
+            'Its intent can only be read by the gateway checkout page.'
+          : 'This value is base64 but does not decode to JSON, so it holds no readable payload.',
+      });
+      return {
+        kind: 'token',
+        input: value.slice(0, 48) + '…',
+        intents: [],
+        fields: [
+          { path: '$', key: 'bytes', value: String(inspection.bytes) },
+          { path: '$', key: 'first_bytes', value: inspection.firstBytesHex },
+        ],
+        notes: ['Treated as an opaque token.'],
+        diagnostics,
+      };
+    }
+  }
+
+  // 4. a URL: fetch the page (or decode the token inside it)
   if (isHttpUrl(value)) {
     const url = assertFetchableUrl(value);
     const page = await bridge.fetchPage(url.toString());

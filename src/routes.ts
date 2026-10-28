@@ -65,7 +65,8 @@ const verifySchema = z
   .passthrough();
 
 const decodeSchema = z.object({
-  url: z.string().trim().min(1).max(2048),
+  // Large enough for a base64 PNG data-URL from `qr_code`.
+  url: z.string().trim().min(1).max(400_000),
 });
 
 function parseAmountPaisa(raw: number | string): number {

@@ -18,7 +18,8 @@ export type IntentSource =
   | 'payment-page'
   | 'session'
   | 'bridge-intent-url'
-  | 'bridge-qr';
+  | 'bridge-qr'
+  | 'qr-image';
 
 export interface IntentView {
   /** The URL exactly as it was found. Never rebuilt — signed intents must stay byte-identical. */
@@ -85,7 +86,11 @@ export interface DecodeReport {
 export interface QrView {
   value: string;
   dataUrl: string | null;
-  source: IntentSource;
+  source: IntentSource | 'bridge-image';
+  /** What scanning it actually does. */
+  kind: 'upi-intent' | 'checkout-url' | 'text';
+  /** Bridge-supplied QR image (e.g. PhonePe's own PNG), if any. */
+  bridgeImage: string | null;
 }
 
 export interface PayPlan {

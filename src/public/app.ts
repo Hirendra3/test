@@ -496,13 +496,23 @@ function payZone(plan: PayPlan): string {
     .join('');
 
   const qr = plan.qr?.dataUrl
-    ? `<div class="qr-block">
-        <img src="${plan.qr.dataUrl}" alt="Scan to pay ${esc(plan.amountLabel)}" />
-        <div class="qr-meta">
-          <strong>Scan with any UPI app</strong>
-          The QR encodes the same gateway-signed intent — payee, amount and reference are locked.
-        </div>
-      </div>`
+    ? plan.qr.kind === 'upi-intent'
+      ? `<div class="qr-block">
+          <img src="${plan.qr.dataUrl}" alt="Scan to pay ${esc(plan.amountLabel)}" />
+          <div class="qr-meta">
+            <strong>Scan with any UPI app</strong>
+            The QR encodes the gateway-signed intent — payee, amount and reference are locked.
+          </div>
+        </div>`
+      : `<div class="qr-block">
+          <img src="${plan.qr.dataUrl}" alt="QR from the gateway" />
+          <div class="qr-meta">
+            <strong>Open the gateway checkout on your phone</strong>
+            This QR was issued by ${esc(plan.pgType === 'easebuzz' ? 'Easebuzz' : 'PhonePe')} and points at their
+            hosted page — scanning it does <em>not</em> call a UPI app directly. Amount and order stay locked either way.
+            <div class="qr-url">${esc(short(plan.qr.value, 46, 12))}</div>
+          </div>
+        </div>`
     : '';
 
   const embedButton = plan.hosted.canEmbed
@@ -588,6 +598,7 @@ function renderPlan(plan: PayPlan, subtitle: string): void {
     primaryIntent ? chip(`from ${primaryIntent.source}`, 'violet') : '',
     brokenCount > 0 ? chip(`${brokenCount} broken link${brokenCount === 1 ? '' : 's'}`, 'bad') : '',
     plan.demo ? chip('demo / sandbox', 'warn') : '',
+    plan.qr?.kind === 'checkout-url' ? chip('no UPI intent in payload', 'warn') : '',
     chip(plan.pgType),
   ]
     .filter(Boolean)

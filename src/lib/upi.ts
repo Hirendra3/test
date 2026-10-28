@@ -241,6 +241,9 @@ function issue(severity: Severity, code: string, message: string): Issue {
 export function evaluateIntent(raw: string, options: EvaluateOptions): IntentView | null {
   const intent = parseIntent(raw);
   if (!intent) return null;
+  // http(s) URLs are checkout pages, not intents. Never let one become a pay button.
+  if (intent.scheme === 'http' || intent.scheme === 'https') return null;
+  if (!isUpiIntentUrl(intent.raw)) return null;
 
   const issues: Issue[] = [];
   const vpa = intent.params.pa ?? intent.params.vpa;

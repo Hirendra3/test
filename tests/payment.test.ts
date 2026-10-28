@@ -346,3 +346,104 @@ test('pg type aliases and phone normalisation', () => {
   assert.equal(normalizePhone('09876543210'), '9876543210');
   assert.equal(normalizePhone('12345'), null);
 });
+
+/* -------------------------------------------------------------------------- */
+/* Live PhonePe "redirect" response (encrypted token + non-UPI QR)            */
+/* -------------------------------------------------------------------------- */
+
+import { readFileSync } from 'node:fs';
+import { decodeQrDataUrl, decodeQrImage, parseImageDataUrl } from '../src/lib/qrDecode.js';
+import { inspectToken } from '../src/lib/base64.js';
+
+const liveResponse = JSON.parse(
+  readFileSync(new URL('./fixtures/live-phonepe-response.json', import.meta.url), 'utf8'),
+) as Record<string, string>;
+
+const liveQrPng = readFileSync(new URL('./fixtures/qr.b64', import.meta.url), 'utf8');
+
+test('live token is recognised as encrypted, not as broken JSON', () => {
+  const token = new URL(liveResponse.payment_url!).searchParams.get('token')!;
+  assert.ok(token.length > 400);
+
+  const inspection = inspectToken(token);
+  assert.ok(inspection);
+  assert.equal(inspection.opaque, true, 'binary/AES token must be flagged opaque');
+  assert.ok(inspection.bytes > 200);
+
+  // it must not be mistaken for decodable JSON
+  assert.equal(tryDecodeJson(token), null);
+
+  const analysed = analyzeToken(token);
+  assert.equal(analysed.intents.length, 0);
+  assert.equal(analysed.layers.length, 0);
+  assert.ok(analysed.warnings.some((w) => /encrypted/i.test(w)));
+});
+
+test('the bridge QR image decodes to the hosted checkout URL, not a UPI intent', () => {
+  const image = parseImageDataUrl(`data:image/png;base64,${liveQrPng.trim()}`);
+  assert.ok(image);
+
+  const decoded = decodeQrImage(image);
+  assert.ok(decoded, 'QR must decode');
+  assert.equal(decoded.kind, 'checkout-url');
+  assert.match(decoded.payload, /^https:\/\/mercury-t2\.phonepe\.com\/transact\/pgv3\?token=/);
+
+  const viaDataUrl = decodeQrDataUrl(liveResponse.qr_code!);
+  assert.equal(viaDataUrl?.payload, decoded.payload);
+});
+
+test('planner falls back to hosted checkout for the live redirect response', () => {
+  const { plan } = buildPayPlan({
+    pgType: 'phonepe',
+    requestedPgType: 'phonepe',
+    txnId: 'ORDER_75781799',
+    amountPaisa: 49900,
+    collectPayload: liveResponse,
+    decodedQr: decodeQrDataUrl(liveResponse.qr_code!).kind === 'upi-intent'
+      ? { payload: decodeQrDataUrl(liveResponse.qr_code!)!.payload, method: 'direct' }
+      : {
+          payload: decodeQrDataUrl(liveResponse.qr_code!)?.payload ?? '',
+          method: 'resampled',
+        },
+    pages: [],
+    sessionPayload: null,
+    demo: false,
+    demoReason: null,
+  });
+
+  // no intent anywhere -> the payable action is the hosted page, never a guess
+  assert.equal(plan.primary?.kind, 'hosted');
+  assert.equal(plan.primary?.url, liveResponse.payment_url);
+  assert.equal(plan.intents.length, 0);
+  assert.equal(plan.apps.length, 0);
+
+  // the QR is kept, but described as a checkout QR
+  assert.equal(plan.qr?.kind, 'checkout-url');
+  assert.equal(plan.qr?.source, 'bridge-image');
+  assert.ok(plan.qr?.bridgeImage?.startsWith('data:image/png'));
+
+  // and the report explains exactly why there is no intent
+  assert.ok(plan.diagnostics.some((d) => d.code === 'QR_IS_CHECKOUT_URL'));
+  assert.ok(plan.diagnostics.some((d) => d.code === 'TOKEN_ENCRYPTED'));
+  assert.ok(plan.diagnostics.some((d) => d.code === 'INTENT_ONLY_ON_PAGE'));
+  assert.ok(plan.diagnostics.some((d) => d.code === 'NO_PAY_ACTION') === false);
+});
+
+test('a UPI intent inside the QR image is used when one exists', () => {
+  const { plan } = buildPayPlan({
+    pgType: 'phonepe',
+    requestedPgType: 'phonepe',
+    txnId: TXN,
+    amountPaisa: 49900,
+    collectPayload: { payment_url: `https://mercury-t2.phonepe.com/x?token=${phonePeToken(signedIntent())}` },
+    decodedQr: { payload: signedIntent(), method: 'direct' },
+    pages: [],
+    sessionPayload: null,
+    demo: false,
+    demoReason: null,
+  });
+
+  assert.equal(plan.primary?.kind, 'intent');
+  assert.equal(plan.qr?.kind, 'upi-intent');
+  assert.ok(plan.intents.some((i) => i.source === 'qr-image' || i.source === 'token'));
+});

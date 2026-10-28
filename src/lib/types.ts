@@ -14,6 +14,7 @@ export interface Issue {
 }
 
 export type IntentSource =
+  | 'direct-upi'
   | 'token'
   | 'payment-page'
   | 'session'
@@ -109,6 +110,21 @@ export interface PayPlan {
   intents: IntentView[];
   /** App-specific deep links for the primary intent (PhonePe / GPay / Paytm / any). */
   apps: PayAction[];
+  /**
+   * App-launch payment built from the merchant's own UPI ID, used when the
+   * gateway only returns an encrypted redirect token and no extractable intent.
+   */
+  directUpi: {
+    vpa: string;
+    payeeName: string;
+    value: string;
+    apps: PayAction[];
+    txnId: string;
+    amountPaisa: number;
+    warning: string;
+  } | null;
+  /** true when no UPI_VPA is configured, so direct app buttons cannot exist. */
+  needsUpiVpa: boolean;
   qr: QrView | null;
   diagnostics: Diagnostic[];
   decode: DecodeReport;

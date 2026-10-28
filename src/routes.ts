@@ -63,6 +63,8 @@ const paySchema = z.object({
   redirect_url: z.string().trim().url('redirect_url must be an absolute URL').optional(),
   payer_first_name: z.string().trim().max(60).optional(),
   payer_last_name: z.string().trim().max(60).optional(),
+  upi_vpa: z.string().trim().max(120).optional(),
+  upi_name: z.string().trim().max(80).optional(),
 });
 
 const statusSchema = z.object({
@@ -157,6 +159,8 @@ export function createApiRouter(config: Config, bridge: BridgeClient): Router {
           redirectUrl: data.redirect_url,
           firstName: data.payer_first_name,
           lastName: data.payer_last_name,
+          upiVpa: data.upi_vpa,
+          upiPayeeName: data.upi_name,
         },
       );
 

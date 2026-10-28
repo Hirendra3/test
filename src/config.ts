@@ -17,6 +17,9 @@ export interface Config {
   fetchPaymentPage: boolean;
   demoMode: DemoMode;
   defaultPgType: 'phonepe' | 'easebuzz';
+  /** Merchant UPI ID used to build a direct app-launch intent when needed. */
+  upiVpa: string | null;
+  upiPayeeName: string | null;
   demoAmountPaise: number;
 }
 
@@ -52,6 +55,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     fetchPaymentPage: bool(env.FETCH_PAYMENT_PAGE, true),
     demoMode: demoRaw === 'on' || demoRaw === 'off' ? demoRaw : 'auto',
     defaultPgType: env.DEFAULT_PG_TYPE === 'easebuzz' ? 'easebuzz' : 'phonepe',
+    upiVpa: env.UPI_VPA?.trim() ? env.UPI_VPA.trim() : null,
+    upiPayeeName: env.UPI_PAYEE_NAME?.trim() ? env.UPI_PAYEE_NAME.trim() : null,
     demoAmountPaise: num(env.DEMO_AMOUNT_PAISE, 49_900),
   };
 }

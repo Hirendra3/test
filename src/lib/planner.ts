@@ -21,7 +21,14 @@ import {
   type TokenSource,
   type WalkResult,
 } from './tokenDecoder.js';
-import { evaluateIntent, isUpiIntentUrl as isUpiIntent, paisaToAmount } from './upi.js';
+import {
+  buildAppLinks,
+  buildDirectIntent,
+  evaluateIntent,
+  isUpiIntentUrl as isUpiIntent,
+  paisaToAmount,
+  parseIntent,
+} from './upi.js';
 import { hostOf } from './url.js';
 import type {
   DecodedSource,
@@ -63,6 +70,8 @@ export interface PlanInput {
   collectPayload: unknown;
   /** Payload recovered from the bridge's QR *image* (data URL decoded upstream). */
   decodedQr?: { payload: string; method: string } | null;
+  /** Merchant VPA used to build an app-launch intent when the gateway gives none. */
+  directUpi?: { vpa: string; payeeName: string | null } | null;
   pages: PageSnapshot[];
   sessionPayload: unknown | null;
   demo: boolean;
@@ -74,6 +83,7 @@ interface CandidateIntent extends ExtractedIntent {
 }
 
 const SOURCE_SCORE: Record<IntentSource, number> = {
+  'direct-upi': 10,
   token: 60,
   'payment-page': 50,
   session: 40,
@@ -83,6 +93,7 @@ const SOURCE_SCORE: Record<IntentSource, number> = {
 };
 
 const SOURCE_RANK: Record<IntentSource, number> = {
+  'direct-upi': 0,
   token: 6,
   'payment-page': 5,
   session: 4,
@@ -98,6 +109,7 @@ const SOURCE_LABEL: Record<IntentSource, string> = {
   'qr-image': 'Decoded QR image',
   'bridge-intent-url': 'Bridge response field',
   'bridge-qr': 'Bridge QR string',
+  'direct-upi': 'Direct UPI ID (no gateway)',
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -388,6 +400,51 @@ export function buildPayPlan(input: PlanInput): PlanResult {
   const primaryIntent = ranked.find((intent) => intent.usable) ?? null;
   if (primaryIntent) primaryIntent.isPrimary = true;
 
+  // ---- direct UPI app-launch intent (merchant VPA) ------------------------
+  let directUpi: PayPlan['directUpi'] = null;
+  const directApps: PayAction[] = [];
+
+  if (!primaryIntent && input.directUpi?.vpa) {
+    const directRaw = buildDirectIntent({
+      vpa: input.directUpi.vpa,
+      payeeName: input.directUpi.payeeName,
+      txnId: input.txnId,
+      amountPaisa: input.amountPaisa,
+      note: `Order ${input.txnId}`,
+    });
+    const view = evaluateIntent(directRaw, {
+      source: 'direct-upi',
+      trusted: false,
+      allowUnsigned: true,
+      expectedAmountPaisa: input.amountPaisa,
+      expectedTxnId: input.txnId,
+    });
+    if (view) {
+      view.jsonPath = 'config.UPI_VPA';
+      view.isPrimary = true;
+      ranked.push(view);
+
+      const parsedDirect = parseIntent(directRaw);
+      const apps = parsedDirect ? buildAppLinks(parsedDirect) : null;
+      directUpi = {
+        vpa: input.directUpi.vpa,
+        payeeName: input.directUpi.payeeName ?? 'Merchant',
+        value: directRaw,
+        txnId: input.txnId,
+        amountPaisa: input.amountPaisa,
+        apps: apps
+          ? buildAppActions({
+              raw: directRaw,
+              appLinks: apps,
+            } as IntentView)
+          : [],
+        warning:
+          'Pays your UPI ID directly (no gateway signature). The money reaches you, but the bridge will not see this payment — reconcile with your bank/UPI statement.',
+      };
+      directApps.push(...directUpi.apps);
+    }
+  }
+
   const hostedUrl = bestHostedUrl(urls);
   const fallback: PayAction | null = hostedUrl
     ? {
@@ -410,7 +467,15 @@ export function buildPayPlan(input: PlanInput): PlanResult {
         url: primaryIntent.appLinks.any ?? primaryIntent.raw,
         hint: 'Signed by the gateway — the amount and payee are locked.',
       }
-    : fallback;
+    : directUpi
+      ? {
+          kind: 'intent',
+          app: 'any',
+          label: 'Pay with UPI app',
+          url: directUpi.value,
+          hint: 'Opens PhonePe / GPay / Paytm on your phone.',
+        }
+      : fallback;
 
   // ---- diagnostics -------------------------------------------------------
   const diagnostics: Diagnostic[] = [];
@@ -589,7 +654,9 @@ export function buildPayPlan(input: PlanInput): PlanResult {
     primary,
     fallback,
     intents: ranked,
-    apps: primaryIntent ? buildAppActions(primaryIntent) : [],
+    apps: primaryIntent ? buildAppActions(primaryIntent) : directApps,
+    directUpi,
+    needsUpiVpa: !input.directUpi?.vpa,
     qr,
     diagnostics,
     decode: {

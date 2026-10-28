@@ -36,6 +36,17 @@ export interface CreatePaymentInput {
   redirectUrl?: string;
   firstName?: string;
   lastName?: string;
+  /** Merchant UPI ID for direct app-launch intents (overrides UPI_VPA). */
+  upiVpa?: string;
+  upiPayeeName?: string;
+}
+
+/** Loose VPA validation: handle@psp, 2–64 chars each side. */
+export function normalizeVpa(raw: string | undefined | null): string | null {
+  const value = (raw ?? '').trim();
+  if (!value) return null;
+  if (!/^[a-zA-Z0-9._-]{2,64}@[a-zA-Z][a-zA-Z0-9.-]{1,32}$/.test(value)) return null;
+  return value;
 }
 
 export function normalizePgType(raw: string | undefined | null, fallback: PgType = 'phonepe'): PgType {
@@ -91,6 +102,11 @@ export async function createPayPlan(
   const pgType = normalizePgType(requestedPgType, config.defaultPgType);
   const txnId = input.txnId?.trim() || generateTxnId();
   const baseUrl = (input.baseUrl ?? config.publicBaseUrl).replace(/\/+$/, '');
+  const directUpi = (() => {
+    const vpa = normalizeVpa(input.upiVpa) ?? normalizeVpa(config.upiVpa);
+    if (!vpa) return null;
+    return { vpa, payeeName: input.upiPayeeName ?? config.upiPayeeName };
+  })();
   const redirectUrl = input.redirectUrl?.trim() || `${baseUrl}/pay/${encodeURIComponent(txnId)}`;
 
   const collectBody: CollectRequest = {
@@ -176,6 +192,7 @@ export async function createPayPlan(
     amountPaisa: input.amount,
     collectPayload,
     decodedQr,
+    directUpi,
     pages,
     sessionPayload,
     demo,
@@ -259,6 +276,9 @@ export async function resumePayPlan(
     amountPaisa: amountHint ?? amountFromSession ?? 0,
     collectPayload: sessionPayload,
     decodedQr,
+    directUpi: normalizeVpa(config.upiVpa)
+      ? { vpa: normalizeVpa(config.upiVpa)!, payeeName: config.upiPayeeName }
+      : null,
     pages,
     sessionPayload,
     demo: false,

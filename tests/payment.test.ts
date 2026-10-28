@@ -447,3 +447,91 @@ test('a UPI intent inside the QR image is used when one exists', () => {
   assert.equal(plan.qr?.kind, 'upi-intent');
   assert.ok(plan.intents.some((i) => i.source === 'qr-image' || i.source === 'token'));
 });
+
+/* -------------------------------------------------------------------------- */
+/* Direct UPI app-launch intent (when the gateway gives no intent)            */
+/* -------------------------------------------------------------------------- */
+
+test('direct UPI intent is built from the merchant VPA and opens each app', () => {
+  const { plan } = buildPayPlan({
+    pgType: 'phonepe',
+    requestedPgType: 'phonepe',
+    txnId: 'ORDER_75781799',
+    amountPaisa: 49900,
+    collectPayload: liveResponse,
+    decodedQr: null,
+    directUpi: { vpa: 'jayamani@ybl', payeeName: 'Jayamani Collections' },
+    pages: [],
+    sessionPayload: null,
+    demo: false,
+    demoReason: null,
+  });
+
+  // no gateway intent exists -> the direct intent becomes the payable action
+  assert.equal(plan.primary?.kind, 'intent');
+  assert.match(plan.primary?.url ?? '', /^upi:\/\/pay\?/);
+  assert.match(plan.primary?.url ?? '', /pa=jayamani%40ybl/);
+  assert.match(plan.primary?.url ?? '', /am=499\.00/);
+  assert.match(plan.primary?.url ?? '', /tr=ORDER_75781799/);
+
+  assert.ok(plan.directUpi);
+  assert.equal(plan.directUpi?.apps.length, 4);
+  const byApp = Object.fromEntries(plan.directUpi!.apps.map((a) => [a.app, a.url]));
+  assert.match(byApp.phonepe!, /^ppe:\/\/pay\?/);
+  assert.match(byApp.gpay!, /^tez:\/\/upi\/pay\?/);
+  assert.match(byApp.paytm!, /^paytmmp:\/\/pay\?/);
+  assert.match(byApp.any!, /^upi:\/\/pay\?/);
+
+  // every app link carries the same amount/reference, only the scheme differs
+  for (const url of Object.values(byApp)) {
+    assert.match(url, /am=499\.00/);
+    assert.match(url, /tr=ORDER_75781799/);
+    assert.match(url, /cu=INR/);
+  }
+
+  assert.equal(plan.needsUpiVpa, false);
+  // direct payments bypass the gateway, so the hosted checkout stays available
+  assert.equal(plan.fallback?.kind, 'hosted');
+});
+
+test('without a VPA there are no app buttons and the UI is told why', () => {
+  const { plan } = buildPayPlan({
+    pgType: 'phonepe',
+    requestedPgType: 'phonepe',
+    txnId: 'ORDER_75781799',
+    amountPaisa: 49900,
+    collectPayload: liveResponse,
+    decodedQr: null,
+    directUpi: null,
+    pages: [],
+    sessionPayload: null,
+    demo: false,
+    demoReason: null,
+  });
+
+  assert.equal(plan.primary?.kind, 'hosted');
+  assert.equal(plan.directUpi, null);
+  assert.equal(plan.needsUpiVpa, true);
+  assert.equal(plan.apps.length, 0);
+});
+
+test('a gateway-signed intent always wins over the direct VPA intent', () => {
+  const { plan } = buildPayPlan({
+    pgType: 'phonepe',
+    requestedPgType: 'phonepe',
+    txnId: TXN,
+    amountPaisa: 49900,
+    collectPayload: collectPayload(),
+    decodedQr: null,
+    directUpi: { vpa: 'jayamani@ybl', payeeName: 'Jayamani Collections' },
+    pages: [],
+    sessionPayload: null,
+    demo: false,
+    demoReason: null,
+  });
+
+  assert.equal(plan.primary?.url, signedIntent());
+  assert.equal(plan.directUpi, null);
+  const sources = plan.intents.map((i) => i.source);
+  assert.ok(!sources.includes('direct-upi'));
+});

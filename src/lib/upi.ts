@@ -230,6 +230,8 @@ export interface EvaluateOptions {
   source: IntentSource;
   /** Intents recovered from a real gateway token/page are more trustworthy. */
   trusted: boolean;
+  /** A merchant-built direct-to-VPA intent is payable; just unsigned. */
+  allowUnsigned?: boolean;
   expectedAmountPaisa?: number | null;
   expectedTxnId?: string | null;
 }
@@ -324,7 +326,7 @@ export function evaluateIntent(raw: string, options: EvaluateOptions): IntentVie
   if (!signed) {
     issues.push(
       issue(
-        options.trusted ? 'warn' : 'block',
+        options.trusted || options.allowUnsigned ? 'warn' : 'block',
         'unsigned-intent',
         options.trusted
           ? 'No sign= parameter. Fine for a plain VPA transfer, rejected by UPI apps for registered-merchant checkout flows.'
@@ -354,4 +356,36 @@ export function evaluateIntent(raw: string, options: EvaluateOptions): IntentVie
     txnId,
     isPrimary: false,
   };
+}
+
+export interface DirectIntentInput {
+  vpa: string;
+  payeeName?: string | null;
+  txnId: string;
+  amountPaisa: number;
+  note?: string | null;
+  /** Merchant category code; 5411 (grocery) is a safe default, override it. */
+  mcc?: string | null;
+}
+
+/**
+ * Build a plain UPI collect intent to the merchant's own VPA.
+ *
+ * This is what a UPI QR encodes: payee + amount + reference, no `sign`. UPI apps
+ * accept it (it is how any person-to-merchant VPA collects money), it opens the
+ * app directly, and the money lands in the merchant's account — but it bypasses
+ * the gateway, so the bridge never sees the payment. Use it when the gateway
+ * only returns an encrypted redirect token and you still want app-launch UX.
+ */
+export function buildDirectIntent(input: DirectIntentInput): string {
+  const params = new URLSearchParams({
+    pa: input.vpa,
+    pn: input.payeeName?.trim() || 'Merchant',
+    tr: input.txnId,
+    tn: input.note?.trim() || `Order ${input.txnId}`,
+    am: paisaToAmount(input.amountPaisa),
+    cu: 'INR',
+    mc: input.mcc?.trim() || '5411',
+  });
+  return `upi://pay?${params.toString()}`;
 }

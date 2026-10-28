@@ -115,6 +115,26 @@ Copy `.env.example` to `.env` (or set the variables in your host):
 
 ---
 
+### Pay buttons that open the app
+
+The Pay button always opens a UPI app when it can:
+
+1. **Gateway-signed intent** (best) — recovered from the token/checkout page. Verified: payee, amount, `sign`.
+2. **Direct UPI intent** — if the gateway only returns an encrypted redirect token, set your merchant UPI ID
+   (`UPI_VPA` in `.env`, or *Advanced → Your UPI ID* in the UI, or `"upi_vpa"` in the request body). The app then
+   builds `upi://pay?pa=<your-vpa>&pn=…&tr=ORDER&am=499.00&cu=INR` plus per-app links:
+
+   | Button | Opens |
+   | :-- | :-- |
+   | PhonePe | `ppe://pay?…` |
+   | Google Pay | `tez://upi/pay?…` |
+   | Paytm | `paytmmp://pay?…` |
+   | Any UPI app | `upi://pay?…` |
+
+   The money lands in your VPA and the app opens on the phone. Caveat, stated in the UI: a direct VPA collect is not
+   seen by the gateway, so confirm it against your UPI/bank statement before shipping.
+3. **Hosted checkout** — always present as the fallback.
+
 ### Testing on a phone
 
 The server always binds `0.0.0.0`, so any device that can reach the host works. On startup it prints the LAN URLs:

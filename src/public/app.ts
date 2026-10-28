@@ -231,6 +231,8 @@ function bindForm(): void {
       if (get('redirect_url')) body.redirect_url = get('redirect_url');
       if (get('payer_first_name')) body.payer_first_name = get('payer_first_name');
       if (get('payer_last_name')) body.payer_last_name = get('payer_last_name');
+      if (get('upi_vpa')) body.upi_vpa = get('upi_vpa');
+      if (get('upi_name')) body.upi_name = get('upi_name');
 
       const plan = await api<PayPlan>('/api/pay', { method: 'POST', body: JSON.stringify(body) });
       renderPlan(plan, 'Created just now');
@@ -479,11 +481,19 @@ function payZone(plan: PayPlan): string {
           <span class="arrow">→</span>
         </a>
         <p class="fallback-hint">
-          No signed UPI intent could be recovered from this payload, so the hosted checkout is the
-          safest route. Use the Inspector below to see what the token contained.
+          ${
+            plan.needsUpiVpa
+              ? 'No UPI intent in this response. Add <strong>Your UPI ID</strong> under Advanced to get direct PhonePe / GPay / Paytm app buttons.'
+              : 'No UPI intent in this response, so the hosted checkout is the safest route.'
+          }
         </p>
       </div>`;
   }
+
+  const directWarning =
+    plan.directUpi && primary.url === plan.directUpi.value
+      ? `<div class="alert alert-warn" style="margin-top:10px">${esc(plan.directUpi.warning)}</div>`
+      : '';
 
   const apps = plan.apps
     .map((action) => {
@@ -544,11 +554,16 @@ function payZone(plan: PayPlan): string {
         </span>
         <span class="stack">
           <span class="title">Pay ${esc(plan.amountLabel)}${isMobile ? ' in your UPI app' : ' — scan or tap'}</span>
-          <span class="sub">Signed by the gateway · verified intent</span>
+          <span class="sub">${
+            plan.directUpi && primary.url === plan.directUpi.value
+              ? `Opens your UPI app · ${esc(plan.directUpi.vpa)}`
+              : 'Signed by the gateway · verified intent'
+          }</span>
         </span>
         <span class="arrow">→</span>
       </a>
       <div class="app-grid">${apps}</div>
+      ${directWarning}
       ${qr}
       ${embedButton}
       ${hostedFallback}

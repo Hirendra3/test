@@ -107,6 +107,15 @@
           <details class="advanced">
             <summary>Advanced</summary>
             <label class="field">
+              <span>Your UPI ID <small>(for app-launch buttons)</small></span>
+              <input name="upi_vpa" id="upi_vpa" placeholder="yourstore@ybl" autocomplete="off" spellcheck="false" />
+              <em class="field-hint">Used to open PhonePe / GPay / Paytm directly when the gateway returns no intent.</em>
+            </label>
+            <label class="field">
+              <span>Payee name <small>(optional)</small></span>
+              <input name="upi_name" id="upi_name" placeholder="Your Store" autocomplete="off" />
+            </label>
+            <label class="field">
               <span>Redirect / webhook URL <small>(optional)</small></span>
               <input name="redirect_url" id="redirect_url" placeholder="defaults to /pay/{order}" autocomplete="off" />
             </label>

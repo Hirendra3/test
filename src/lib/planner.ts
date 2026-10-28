@@ -503,8 +503,16 @@ export function buildPayPlan(input: PlanInput): PlanResult {
     },
     hosted: {
       paymentUrl: urls.paymentUrl,
+      pgPaymentUrl: urls.pgPaymentUrl,
       tokenUrl: urls.tokenUrl,
       customPaymentUrl: urls.customPaymentUrl,
+      checkoutScript: urls.checkoutScript,
+      canEmbed: Boolean(
+        urls.checkoutScript &&
+          (urls.tokenUrl ?? urls.paymentUrl) &&
+          input.pgType !== 'easebuzz' &&
+          !input.demo,
+      ),
     },
   };
 

@@ -11,6 +11,7 @@ import {
 } from './services/checkout.js';
 import { bridgeHealth, fetchPaymentStatus } from './services/status.js';
 import { decodeArbitraryValue } from './services/decode.js';
+import { readReturnHint, verifyReturn } from './services/verify.js';
 import type { ApiError } from './lib/types.js';
 
 export class ApiErrorResponse extends Error {
@@ -52,6 +53,16 @@ const statusSchema = z.object({
   pg_txn_id: z.string().trim().min(1),
   amount: z.union([z.number(), z.string()]).optional(),
 });
+
+const verifySchema = z
+  .object({
+    txn_id: z.union([z.string(), z.number()]).optional(),
+    pg_txn_id: z.union([z.string(), z.number()]).optional(),
+    pg_type: z.string().trim().optional(),
+    amount: z.union([z.number(), z.string()]).optional(),
+    status: z.string().trim().optional(),
+  })
+  .passthrough();
 
 const decodeSchema = z.object({
   url: z.string().trim().min(1).max(2048),
@@ -190,6 +201,72 @@ export function createApiRouter(config: Config, bridge: BridgeClient): Router {
       }
       const result = await decodeArbitraryValue(config, bridge, parsed.data.url);
       res.json({ ok: true, ...result });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Re-verify a payment server-side. Accepts the gateway's own return payload
+   * (query or form-encoded), ignores its claimed status, and answers from the
+   * bridge. Safe to call from the browser after a redirect.
+   */
+  const handleVerify = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const merged: Record<string, unknown> = {
+        ...(req.query as Record<string, unknown>),
+        ...((req.body ?? {}) as Record<string, unknown>),
+        ...(req.params.txnId ? { txn_id: req.params.txnId } : {}),
+      };
+      const parsed = verifySchema.safeParse(merged);
+      if (!parsed.success) {
+        fail(res, 400, 'VALIDATION_ERROR', 'Invalid verification payload.', parsed.error.flatten());
+        return;
+      }
+
+      const hint = readReturnHint(parsed.data as Record<string, unknown>);
+      if (!hint.txnId) {
+        fail(res, 400, 'MISSING_TXN', 'No order reference (txn_id) supplied.');
+        return;
+      }
+      const expectedAmountPaisa =
+        parsed.data.amount !== undefined ? parseAmountPaisa(parsed.data.amount) : hint.amountPaisa;
+
+      const result = await verifyReturn({ config, bridge }, { ...hint, expectedAmountPaisa });
+      res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  router.post('/verify', handleVerify);
+  router.get('/verify/:txnId', handleVerify);
+  router.post('/verify/:txnId', handleVerify);
+
+  /**
+   * Webhook receiver. Point `redirect_url`/server-to-server callbacks here.
+   * The payload is treated as untrusted: only the order reference is read, the
+   * state comes from the bridge, and a non-2xx tells the gateway to retry.
+   */
+  router.post('/webhook/:pgType?', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const hint = readReturnHint({ ...(req.query as Record<string, unknown>), ...body });
+      if (!hint.txnId) {
+        // 200 with ok:false so gateways don't retry forever on a malformed body.
+        res.status(200).json({ ok: false, error: 'no txn_id in payload' });
+        return;
+      }
+      if (!hint.pgType && typeof req.params.pgType === 'string') hint.pgType = req.params.pgType;
+
+      const result = await verifyReturn(
+        { config, bridge },
+        { ...hint, expectedAmountPaisa: hint.amountPaisa },
+      );
+      console.log(
+        `[webhook] ${result.txnId} claimed=${result.claimedStatus ?? '-'} gateway=${result.status} verified=${result.verified}`,
+      );
+      res.status(200).json(result);
     } catch (error) {
       next(error);
     }

@@ -44,6 +44,7 @@ function fixturePlan() {
     collectPayload: {
       payment_url: `https://mercury-t2.phonepe.com/transact/pgv3?token=${token}`,
       token_url: `https://mercury-t2.phonepe.com/transact/pgv3?token=${token}`,
+      checkout_script: 'https://mercury.phonepe.com/web/bundle/checkout.js',
       phonepe_intent_url: `upi://pay?pa=merchant@upi&pn=Merchant&tr=${txn}&am=499.00&cu=INR`,
     },
     pages: [],
@@ -103,6 +104,19 @@ test('checkout UI renders a working pay button from the decoded token', async ()
       });
     }
     if (url.startsWith('/api/pay')) return json(plan);
+    if (url.startsWith('/api/verify')) {
+      return json({
+        ok: true,
+        verified: true,
+        txnId: plan.txnId,
+        claimedStatus: 'success',
+        status: 'success',
+        amountPaisa: 49900,
+        amountMatches: true,
+        demo: false,
+        message: 'Payment verified with the gateway.',
+      });
+    }
     if (url.startsWith('/api/status')) {
       return json({
         ok: true,
@@ -157,6 +171,10 @@ test('checkout UI renders a working pay button from the decoded token', async ()
   assert.ok(body.querySelectorAll('.diag[data-level="error"]').length >= 1, 'broken intent is reported');
   assert.ok(body.querySelectorAll('.tab-btn').length === 4);
 
+  // in-page PhonePe modal button is offered when the plan allows embedding
+  const embed = body.querySelector<HTMLButtonElement>('#embed-pay');
+  assert.ok(embed, 'in-page checkout button should render when canEmbed is true');
+
   // tabs switch panels
   const intentsTab = [...body.querySelectorAll<HTMLButtonElement>('.tab-btn')].find(
     (button) => button.dataset.tab === 'intents',
@@ -185,6 +203,80 @@ test('checkout UI renders a working pay button from the decoded token', async ()
   assert.match(errorBox.textContent ?? '', /PG_NOT_CONFIGURED/);
   define('fetch', fetchSpy);
 
+  // embed click with no PhonePe script available must degrade, not throw
+  embed?.click();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const tracker = window.document.querySelector('#pay-tracker') as HTMLElement;
+  assert.equal(tracker.hidden, false, 'tracker should report the embed attempt');
+  assert.ok((tracker.textContent ?? '').length > 0);
+
   assert.ok(calls.some((call) => call.includes('/api/health')));
+  window.close();
+});
+
+test('return URL renders a gateway-verified banner', async () => {
+  const html = readFileSync(new URL('../src/public/index.html', import.meta.url), 'utf8');
+  const plan = fixturePlan();
+
+  const dom = new JSDOM(html, {
+    url: `http://localhost:3000/pay/${plan.txnId}?verify=1&status=success&pg_type=phonepe`,
+    pretendToBeVisual: true,
+  });
+  const { window } = dom;
+  window.Element.prototype.scrollIntoView = function scrollIntoView() {};
+
+  const define = (key: string, value: unknown): void => {
+    Object.defineProperty(globalThis, key, { value, configurable: true, writable: true });
+  };
+
+  define('window', window);
+  define('document', window.document);
+  define('location', window.location);
+  define('history', window.history);
+  define('MutationObserver', window.MutationObserver);
+  define('FormData', window.FormData);
+  define('HTMLElement', window.HTMLElement);
+  define('Element', window.Element);
+  define('Event', window.Event);
+  define('fetch', async (input: string | URL | Request) => {
+    const url = String(input);
+    const json = (body: unknown): Response =>
+      ({ ok: true, status: 200, json: async () => body }) as unknown as Response;
+
+    if (url.startsWith('/api/verify')) {
+      return json({
+        ok: true,
+        verified: true,
+        txnId: plan.txnId,
+        claimedStatus: 'success',
+        status: 'success',
+        amountPaisa: 49900,
+        amountMatches: true,
+        demo: false,
+        message: 'Payment verified with the gateway.',
+      });
+    }
+    if (url.startsWith('/api/pay')) return json(plan);
+    if (url.startsWith('/api/health')) {
+      return json({
+        app: 'ok',
+        bridge: { reachable: true, latencyMs: 90, error: null, payload: {}, missingGateways: [] },
+        demoMode: 'off',
+      });
+    }
+    return json({});
+  });
+
+  await import('../src/public/app.js?return=1');
+  await new Promise((resolve) => setTimeout(resolve, 80));
+
+  const banner = window.document.querySelector('#verify-banner') as HTMLElement;
+  assert.equal(banner.hidden, false, 'verification banner should be visible');
+  assert.match(banner.textContent ?? '', /Payment verified/);
+  assert.match(banner.textContent ?? '', /Redirect claimed/);
+  assert.match(banner.textContent ?? '', /₹499\.00/);
+
+  const tracker = window.document.querySelector('#pay-tracker') as HTMLElement;
+  assert.equal(tracker.dataset.state, 'success');
   window.close();
 });

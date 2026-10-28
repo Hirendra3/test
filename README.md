@@ -59,7 +59,10 @@ POST /api/pay {pg_type, amount, email, phone}
         ├─ 6. judge each one: pa? real VPA? am matches the order? tr matches? sign present & intact?
         ├─ 7. rank: signed+token-derived > page-derived > bridge-templated
         │
-        └─ 8. return  { primary, fallback, apps, qr, intents[], diagnostics, decode }
+        ├─ 8. return  { primary, fallback, apps, qr, intents[], diagnostics, decode }
+        │
+        └─ later: GET /api/verify/:txnId  → re-check with the gateway (never trust the redirect)
+                  POST /api/webhook/:pg    → same, for server-to-server callbacks
 ```
 
 Rules baked into the ranking:
@@ -86,7 +89,7 @@ Production:
 ```bash
 npm run build        # tsc → dist/, esbuild → public/
 npm start            # serves UI + API on :3000
-npm test             # 19 tests (node:test) — decoding, ranking, status, DOM smoke test
+npm test             # 37 tests — decoding, ranking, status, HTTP routes, DOM smoke tests
 ```
 
 Copy `.env.example` to `.env` (or set the variables in your host):
@@ -250,6 +253,61 @@ curl -s -X POST localhost:3000/api/decode -H 'Content-Type: application/json' \
 
 The same tool is in the UI (**Inspector**, step 2).
 
+### `POST /api/verify` and `GET /api/verify/:txnId` — trust the gateway, not the redirect
+
+Gateways return the customer to `redirect_url` with query/form params — **all attacker-controllable**. This endpoint
+throws the claimed status away, asks the bridge for the authoritative state, and compares the amount.
+
+```bash
+# PhonePe style query return
+curl -s "localhost:3000/api/verify/ORDER_1001?status=success&pg_type=phonepe&amount=49900" | jq
+
+# Easebuzz style form post
+curl -s -X POST localhost:3000/api/verify \
+  -d 'txnid=ORDER_1001&status=success&amount=49900' | jq
+```
+
+```json
+{
+  "ok": true,
+  "verified": true,
+  "txnId": "ORDER_1001",
+  "claimedStatus": "success",
+  "status": "success",
+  "amountPaisa": 49900,
+  "amountMatches": true,
+  "demo": false,
+  "checkedAt": "2026-10-28T09:31:02.114Z",
+  "message": "Payment verified with the gateway."
+}
+```
+
+A redirect that lies is called out explicitly:
+
+```json
+{ "status": "pending", "verified": false,
+  "message": "The redirect claims "success" but the gateway says pending. Trust the gateway." }
+```
+
+`verified` is only `true` for a terminal `success` **with a matching amount** — safe to fulfil on.
+
+### `POST /api/webhook/:pgType` — server-to-server callbacks
+
+Same verification, form-encoded or JSON, no browser session needed. Always answers `200` for well-formed bodies
+(and `200 { ok: false }` for malformed ones) so gateways don't retry forever; the state comes from the bridge.
+
+```bash
+curl -s -X POST localhost:3000/api/webhook/easebuzz \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'txnid=ORDER_1002&status=success&amount=49900' | jq
+```
+
+### Gateway return pages
+
+`POST /pay/:txnId`, `POST|GET /return`, `POST|GET /payment/callback` accept a gateway callback, keep only the order
+reference, and `303` the browser to `/pay/<txn>?verify=1&…` where the SPA renders a verified banner. Point
+`redirect_url` at any of them.
+
 ---
 
 ## 5. The UI
@@ -259,7 +317,13 @@ The same tool is in the UI (**Inspector**, step 2).
   a scannable **QR of the signed intent**, and the hosted-checkout fallback.
 * Tabs: **Diagnostics** (what happened), **Intents** (every link found + why each is or is not payable),
   **Decoded token** (origins, layers, `amount`/`tr`/expiry), **Raw JSON**.
+* **“Pay without leaving this page”** loads `checkout_script` and calls
+  `window.PhonePeCheckout.transact({ tokenUrl, type: 'IFRAME', callback })` — the in-page option documented by the
+  bridge. If the script is blocked (CSP, offline, gateway down) it degrades to the hosted-checkout button instead of
+  failing silently. Shown only when `hosted.canEmbed` is true (never for Easebuzz or sandbox plans).
 * After a Pay tap the UI polls `/api/status` and reports `pending → success/failed` in place.
+* Coming back from a gateway, the SPA calls `/api/verify/:txnId` and renders its own banner:
+  ✓ verified / ✕ failed / … pending, the gateway amount, and the **claimed vs actual** state.
 * Refresh on `/pay/:txnId` resumes the order (session API, then a local cache).
 * Responsive, light/dark, keyboard accessible, no client-side framework (~21 kB of JS).
 
@@ -287,9 +351,22 @@ The same tool is in the UI (**Inspector**, step 2).
     } else {
       location.href = plan.primary.url;      // hosted checkout fallback
     }
-    // keep plan.txnId; verify server-side with POST /api/status before fulfilling
+    // keep plan.txnId; verify server-side before fulfilling
   }
 </script>
+```
+
+On your own server, when the customer lands back (or your webhook fires):
+
+```js
+const res = await fetch(`https://your-checkout.example.com/api/verify/${txnId}?pg_type=phonepe&amount=${orderTotal}`);
+const result = await res.json();
+
+if (result.verified && result.amountPaisa === orderTotal) {
+  await markOrderPaid(txnId);          // idempotent on txn_id
+} else {
+  console.warn('not fulfilled:', result.status, result.message);
+}
 ```
 
 **Never fulfil an order on the browser redirect alone.** Call `/api/status` from your server (or use the bridge
@@ -301,13 +378,15 @@ webhook) and compare `amountPaisa` with your own order total.
 
 ```
 src/
-  server.ts                 express app: JSON API + static UI + SPA routes
+  server.ts                 boot: config → bridge client → app.listen
+  app.ts                    express wiring: JSON/urlencoded, CORS, API, gateway returns, SPA
   routes.ts                 validation (zod), CORS, error envelope
   config.ts                 env parsing
   bridge/client.ts          bridge HTTP client (collect / session / status / page fetch)
   services/
     checkout.ts             collect → page + session → plan  (+ demo fallback, resume)
     status.ts               status normalisation, amount checks, health cache
+    verify.ts               return/webhook verification (gateway is the source of truth)
     decode.ts               the Inspector endpoint
   lib/
     tokenDecoder.ts         recursive base64url-JSON walker + HTML miner
@@ -317,7 +396,8 @@ src/
   public/                   index.html, styles.css, app.ts (esbuild → public/)
 tests/
   payment.test.ts           18 tests: decoding, ranking, status, validation
-  ui.test.ts                DOM smoke test: renders the pay button, QR, tabs, error path
+  api.test.ts               17 tests: routes, errors, verify/webhook, CORS (supertest + stubbed bridge)
+  ui.test.ts                2 DOM smoke tests: pay button/QR/tabs/embed + verified return banner
 scripts/                    dev.mjs, build-client.mjs, ensure-build.mjs
 ```
 
@@ -334,6 +414,9 @@ scripts/                    dev.mjs, build-client.mjs, ensure-build.mjs
 | Amount on the intent ≠ order | Bridge built the intent from a different amount / rupees vs paise | `amount-mismatch` is blocking; send paise |
 | QR missing | Intent longer than 1200 chars | Use the hosted checkout link (the UI already offers it) |
 | `DEMO_PLAN` chip in the UI | Bridge unreachable from this host | Check egress/DNS, `BRIDGE_BASE_URL`, or turn `DEMO_MODE=off` |
+| In-page modal says the script could not load | `checkout.js` blocked by CSP or offline | Allow `mercury.phonepe.com` in `script-src`, or use the hosted button |
+| Return page shows “claim vs gateway” mismatch | Someone edited the redirect params (or a stale callback) | Expected: your fulfilment must key off `verified: true` only |
+| Webhook keeps being retried | Your handler returned non-2xx | Return `200` once `verify` responds; make it idempotent by `txn_id` |
 
 ---
 

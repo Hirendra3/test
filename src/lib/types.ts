@@ -109,8 +109,13 @@ export interface PayPlan {
   decode: DecodeReport;
   hosted: {
     paymentUrl: string | null;
+    pgPaymentUrl: string | null;
     tokenUrl: string | null;
     customPaymentUrl: string | null;
+    /** PhonePe's checkout.js — enables the in-page IFRAME modal. */
+    checkoutScript: string | null;
+    /** true when an in-page modal can be attempted (needs token + script). */
+    canEmbed: boolean;
   };
 }
 

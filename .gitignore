@@ -1,6 +1,8 @@
+# Build output (anchored so source dirs like src/public are never ignored)
+/dist/
+/public/
+
 node_modules/
-dist/
-public/
 .env
 .env.local
 *.log

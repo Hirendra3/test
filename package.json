@@ -13,7 +13,7 @@
     "build:client": "node scripts/build-client.mjs",
     "start": "node scripts/ensure-build.mjs && node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
-    "test": "node --import tsx --test tests/*.test.ts"
+    "test": "node --import tsx --test tests/payment.test.ts tests/api.test.ts tests/ui.test.ts"
   },
   "dependencies": {
     "express": "^4.21.2",
